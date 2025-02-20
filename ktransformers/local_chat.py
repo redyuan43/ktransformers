@@ -77,22 +77,30 @@ def local_chat(
     else:
         torch.set_default_dtype(config.torch_dtype)
 
+    # 对于P40显卡，强制使用eager attention实现
+    if torch.cuda.get_device_capability()[0] < 8:  # Ampere是8.x
+        config._attn_implementation = "eager"
+        print("Using eager attention implementation for pre-Ampere GPU")
+    
     with torch.device("meta"):
         if config.architectures[0] in custom_models:
             print("using custom modeling_xxx.py.")
+            # 强制所有模型使用eager注意力实现
+            config._attn_implementation = "eager"
             if (
                 "Qwen2Moe" in config.architectures[0]
-            ):  # Qwen2Moe must use flash_attention_2 to avoid overflow.
-                config._attn_implementation = "flash_attention_2"
-            if "Llama" in config.architectures[0]:
+            ):  # Qwen2Moe must use eager to avoid overflow.
                 config._attn_implementation = "eager"
+            if "Llama" in config.architectures[0]:
+                config._attn_implementation = "eager" 
             if "Mixtral" in config.architectures[0]:
-                config._attn_implementation = "flash_attention_2"
+                config._attn_implementation = "eager"
 
             model = custom_models[config.architectures[0]](config)
         else:
+            # 对于其他模型也使用eager实现
             model = AutoModelForCausalLM.from_config(
-                config, trust_remote_code=True, attn_implementation="flash_attention_2"
+                config, trust_remote_code=True, attn_implementation="eager"
             )
 
     if optimize_rule_path is None:

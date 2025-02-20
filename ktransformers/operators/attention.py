@@ -63,7 +63,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             
         return self.q_absorb, self.out_absorb
 
-    def forward_chunck(
+    def forward_chunked(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
@@ -268,7 +268,12 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             print("compressed_kv", torch.isnan(compressed_kv[:,:,0,:]).any())
             print("position_ids", torch.isnan(position_ids).any())
             """
-
+            original_dtype = query_states.dtype
+            target_dtype = torch.half
+            query_states = query_states.to(target_dtype)
+            compressed_kv_with_k_pe = compressed_kv_with_k_pe.to(target_dtype)
+            compressed_kv = compressed_kv.to(target_dtype)
+            attn_output = attn_output.to(target_dtype)
             # flash attn doesn't support head_dim bigger than 256
             # use triton attention kernel adapted from vLLM and SGLang for MQA
             decode_attention_fwd_grouped(query_states, compressed_kv_with_k_pe, compressed_kv, attn_output,
@@ -277,6 +282,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                              4, #num_kv_splits # follow vLLM, fix it TODO
                              self.softmax_scale,
                              past_key_value.page_size)
+            attn_output = attn_output.to(original_dtype)
             
             # attn_output [bsz, q_len, self.num_heads, self.kv_lora_rank]
             # out_absorb [self.num_heads, self.v_head_dim, self.kv_lora_rank]
@@ -512,7 +518,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
         bsz, q_len, _ = hidden_states.size()
 
         if q_len <= self.chunck_size:
-            return self.forward_chunck(
+            return self.forward_chunked(
                             hidden_states,
                             attention_mask,
                             position_ids,
@@ -542,7 +548,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                 self.attn_mask[:, :, :, :cur_idx] = 0
                 chunk_mask = torch.narrow(self.attn_mask, 2, 0, min(self.chunck_size, q_len-cur_idx))
 
-            cur_output, _, _ = self.forward_chunck(
+            cur_output, _, _ = self.forward_chunked(
                             hidden_states[:, cur_idx:min(cur_idx + self.chunck_size, q_len), ...],
                             chunk_mask,
                             position_ids[:, cur_idx:min(cur_idx + self.chunck_size, q_len)],
@@ -583,7 +589,8 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                 **kwargs,
             )
         else:
-            if flashinfer_enabled:
+            # 检查GPU是否支持FlashAttention
+            if flashinfer_enabled and torch.cuda.get_device_capability()[0] >= 8:
                 return self.forward_linux_flashinfer(
                     hidden_states,
                     attention_mask,
@@ -595,7 +602,8 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                     **kwargs,
                 )
             else:
-                return self.forward_linux_triton(
+                # 对于不支持FlashAttention的GPU，使用chunked attention
+                return self.forward_chunked(
                     hidden_states,
                     attention_mask,
                     position_ids,

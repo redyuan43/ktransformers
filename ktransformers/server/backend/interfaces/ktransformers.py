@@ -29,7 +29,11 @@ class KTransformersInterface(TransformersInterface):
         torch.set_grad_enabled(False)
         self.tokenizer = AutoTokenizer.from_pretrained(args.model_dir, device=args.device, trust_remote_code=args.trust_remote_code)
         config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=args.trust_remote_code)
-        if config.architectures[0] == "Qwen2MoeForCausalLM":
+        
+        # 检查GPU类型，对于P40等旧GPU强制使用eager实现
+        if torch.cuda.get_device_capability()[0] < 8:
+            config._attn_implementation = "eager"
+        elif config.architectures[0] == "Qwen2MoeForCausalLM":
             config._attn_implementation = "flash_attention_2"
 
         with torch.device("meta"):
